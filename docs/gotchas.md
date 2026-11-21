@@ -86,3 +86,28 @@ today's `shift_date`, so one completion covers every user and every shift that
 day. It deliberately gates *before* the open-shift form for billing users; do
 not move it after an entry is found or a shift can be opened by someone who is
 then stuck on the checklist.
+
+## `bench run-tests` deletes every Item Price
+
+ERPNext runs `before_tests` before the suite
+(`erpnext.setup.utils.before_tests`, wired in `erpnext/hooks.py`). It executes
+`delete from tabItem Price` and **commits** — outside the test transaction, so
+it is not rolled back. The same hook also sets
+`Stock Settings.auto_insert_price_list_rate_if_missing = 0`, seeds
+`Selling Settings.customer_group` / `territory`, and adds all roles to
+Administrator.
+
+Consequence on this bench: running the suite against `ury.localhost` empties
+the menu's prices, and the POS then fails with
+"No item price found for Item: … in Price List: Default Menu".
+
+Always pass the flag here:
+
+```
+bench --site ury.localhost run-tests --module <module> --skip-before-tests
+```
+
+If it is ever run without it, restore `Item Price` from the newest database
+backup in `sites/ury.localhost/private/backups/` (replay the
+`INSERT INTO \`tabItem Price\`` block), and put the settings above back.
+
