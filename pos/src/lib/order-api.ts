@@ -67,7 +67,7 @@ export async function getTableOrder(table_no: string): Promise<TableOrder> {
 
 export interface SyncOrderRequest {
   table?: string;
-  customer?: string;
+  customer: string;
   items: Array<{
     item: string;
     item_name: string;

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import { storage } from '@ury/core';
 import { getRestaurantMenu, getAggregatorMenu, MenuItem as APIMenuItem } from '../lib/menu-api';
-import { getCurrencyInfo, PosProfileCombined, getCombinedPosProfile } from '../lib/pos-profile-api';
+import { getCurrencyInfo, PosProfileCombined, getCombinedPosProfile, resolveDefaultCustomer } from '../lib/pos-profile-api';
 import { getMenuCourses } from '../lib/menu-course-api';
 import { getCustomerGroups, getCustomerTerritories } from '../lib/customer-api';
 import { DEFAULT_ORDER_TYPE, OrderType } from '../data/order-types';
@@ -129,6 +129,12 @@ interface POSState {
   isUpdatingOrder: boolean;
   orderId: string | null;
   posProfile: PosProfileCombined | null;
+  /**
+   * The POS Profile's default customer, resolved once at profile load. New
+   * orders start on this; it is never applied over an existing order or a
+   * deliberate "Change" (both clear `selectedCustomer` on purpose).
+   */
+  defaultCustomer: Customer | null;
   customerGroups: string[];
   territories: string[];
   tableOrder: TableOrder | null;
@@ -170,6 +176,7 @@ interface POSStore extends POSState {
   processPayment: (paymentMode: string, amount: number) => Promise<void>;
   updateOrderStatus: (orderId: string, status: Order['status']) => Promise<void>;
   fetchPosProfile: () => Promise<void>;
+  applyProfileDefaults: () => Promise<void>;
   fetchCustomerGroups: () => Promise<void>;
   fetchTerritories: () => Promise<void>;
   fetchCurrencySymbol: () => Promise<void>;
@@ -310,6 +317,7 @@ export const usePOSStore = create<POSStore>((set, get) => ({
   paymentModes: ['Cash'],
   orders: [],
   posProfile: null,
+  defaultCustomer: null,
   customerGroups: [],
   territories: [],
   currency: storage.getItem('currency') || 'INR',
@@ -364,6 +372,7 @@ export const usePOSStore = create<POSStore>((set, get) => ({
           profileLoading: false,
           currency: profile.currency || 'INR'
         });
+        await get().applyProfileDefaults();
         if (!storage.getItem('currencySymbol')) {
           await get().fetchCurrencySymbol();
         }
@@ -379,6 +388,7 @@ export const usePOSStore = create<POSStore>((set, get) => ({
         profileLoading: false,
         currency: combinedProfile.currency || 'INR'
       });
+      await get().applyProfileDefaults();
       
       if (!storage.getItem('currencySymbol')) {
         await get().fetchCurrencySymbol();
@@ -390,6 +400,27 @@ export const usePOSStore = create<POSStore>((set, get) => ({
         profileLoading: false 
       });
     }
+  },
+
+  /**
+   * Resolve `POS Profile.customer` and seed it into an empty order.
+   *
+   * Only runs for "new order state" (no customer, no invoice, not updating).
+   * A busy tab, an existing draft's customer, and the picker's own "Change"
+   * button all survive untouched.
+   */
+  applyProfileDefaults: async () => {
+    const profile = get().posProfile;
+    if (!profile) return;
+
+    const resolved = await resolveDefaultCustomer(profile.customer);
+    const { selectedCustomer, orderId, isUpdatingOrder } = get();
+    const shouldSeed = Boolean(resolved) && !selectedCustomer && !orderId && !isUpdatingOrder;
+
+    set({
+      defaultCustomer: resolved,
+      ...(shouldSeed ? { selectedCustomer: resolved } : {}),
+    });
   },
 
   fetchCurrencySymbol: async () => {
@@ -763,7 +794,7 @@ export const usePOSStore = create<POSStore>((set, get) => ({
             id: order.customer,
             name: order.customer_name,
             phone: order.mobile_number,
-          } : null,
+          } : get().defaultCustomer,
           isUpdatingOrder: true,
           orderId: order.name,
           originalCartHash: generateCartHash({ activeOrders: orderItems, selectedCustomer: order.customer ? { id: order.customer } as any : null, orderComment: '' }),
@@ -779,7 +810,7 @@ export const usePOSStore = create<POSStore>((set, get) => ({
             id: order.customer,
             name: order.customer_name || order.customer,
             phone: order.mobile_number || '',
-          } : null,
+          } : get().defaultCustomer,
           isUpdatingOrder: false,
           orderId: order?.name || null,
           noOfPax: order?.no_of_pax || 1,
@@ -792,7 +823,7 @@ export const usePOSStore = create<POSStore>((set, get) => ({
         error: 'Failed to load table order',
         tableOrder: null,
         activeOrders: [],
-        selectedCustomer: null,
+        selectedCustomer: get().defaultCustomer,
         isUpdatingOrder: false,
         orderId: null,
         noOfPax: 1,
@@ -808,7 +839,7 @@ export const usePOSStore = create<POSStore>((set, get) => ({
     set({
       tableOrder: null,
       activeOrders: [],
-      selectedCustomer: null,
+      selectedCustomer: get().defaultCustomer,
       isUpdatingOrder: false,
       orderId: null,
       noOfPax: 1,
@@ -835,13 +866,15 @@ export const usePOSStore = create<POSStore>((set, get) => ({
     if (newTabOrder.length > 0) {
       const targetTab = newTabOrder[newTabOrder.length - 1];
       const targetTabState = newHeldTabs[targetTab.id];
+      const targetCustomer = targetTabState.selectedCustomer
+        ?? (targetTabState.orderId ? null : get().defaultCustomer);
       
       set({
         tabOrder: newTabOrder,
         activeTabId: targetTab.id,
         heldTabs: newHeldTabs,
         activeOrders: targetTabState.activeOrders,
-        selectedCustomer: targetTabState.selectedCustomer,
+        selectedCustomer: targetCustomer,
         selectedOrderType: targetTabState.selectedOrderType,
         selectedTable: targetTabState.selectedTable,
         selectedRoom: targetTabState.selectedRoom,
@@ -863,7 +896,7 @@ export const usePOSStore = create<POSStore>((set, get) => ({
         heldTabs: {},
         nextTabNumber: 2,
         activeOrders: [],
-        selectedCustomer: null,
+        selectedCustomer: get().defaultCustomer,
         selectedOrderType: DEFAULT_ORDER_TYPE,
         selectedTable: null,
         selectedRoom: null,
@@ -905,7 +938,7 @@ export const usePOSStore = create<POSStore>((set, get) => ({
       nextTabNumber: state.nextTabNumber + 1,
       heldTabs: { ...state.heldTabs, [state.activeTabId]: currentTabState },
       activeOrders: [],
-      selectedCustomer: null,
+      selectedCustomer: get().defaultCustomer,
       selectedOrderType: DEFAULT_ORDER_TYPE,
       selectedTable: null,
       selectedRoom: null,
@@ -955,12 +988,17 @@ export const usePOSStore = create<POSStore>((set, get) => ({
 
     const newHeldTabs = { ...state.heldTabs, [state.activeTabId]: currentTabState };
     const targetTabState = newHeldTabs[tabId];
+    // Empty tabs are "new order state": show the profile default. Tabs holding
+    // a draft keep exactly what was persisted, including a deliberately
+    // cleared customer.
+    const targetCustomer = targetTabState.selectedCustomer
+      ?? (targetTabState.orderId ? null : get().defaultCustomer);
 
     set({
       activeTabId: tabId,
       heldTabs: newHeldTabs,
       activeOrders: targetTabState.activeOrders,
-      selectedCustomer: targetTabState.selectedCustomer,
+      selectedCustomer: targetCustomer,
       selectedOrderType: targetTabState.selectedOrderType,
       selectedTable: targetTabState.selectedTable,
       selectedRoom: targetTabState.selectedRoom,
@@ -988,7 +1026,7 @@ export const usePOSStore = create<POSStore>((set, get) => ({
         heldTabs: {},
         nextTabNumber: 2,
         activeOrders: [],
-        selectedCustomer: null,
+        selectedCustomer: get().defaultCustomer,
         selectedOrderType: DEFAULT_ORDER_TYPE,
         selectedTable: null,
         selectedRoom: null,
@@ -1011,13 +1049,15 @@ export const usePOSStore = create<POSStore>((set, get) => ({
       const targetIndex = Math.min(closedIndex, newTabOrder.length - 1);
       const targetTab = newTabOrder[targetIndex];
       const targetTabState = newHeldTabs[targetTab.id];
+      const targetCustomer = targetTabState.selectedCustomer
+        ?? (targetTabState.orderId ? null : get().defaultCustomer);
 
       set({
         tabOrder: newTabOrder,
         activeTabId: targetTab.id,
         heldTabs: newHeldTabs,
         activeOrders: targetTabState.activeOrders,
-        selectedCustomer: targetTabState.selectedCustomer,
+        selectedCustomer: targetCustomer,
         selectedOrderType: targetTabState.selectedOrderType,
         selectedTable: targetTabState.selectedTable,
         selectedRoom: targetTabState.selectedRoom,

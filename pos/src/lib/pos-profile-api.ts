@@ -140,6 +140,32 @@ export async function getCombinedPosProfile(): Promise<PosProfileCombined> {
   return combinedProfile;
 }
 
+/**
+ * Resolve the POS Profile's default customer into the shape the picker uses.
+ *
+ * `PosProfile.customer` is a Link, so the profile only carries an ID. Fetching
+ * the Customer once at profile load gives the picker the real display name and
+ * phone. Returns null when the profile has no default or the lookup fails —
+ * callers then keep the pre-existing manual-selection behaviour.
+ */
+export async function resolveDefaultCustomer(
+  customerId: string | null | undefined
+): Promise<{ id: string; name: string; phone: string } | null> {
+  if (!customerId) return null;
+
+  try {
+    const doc = await db.getDoc(DOCTYPES.CUSTOMER, customerId);
+    return {
+      id: doc.name,
+      name: doc.customer_name || doc.name,
+      phone: doc.mobile_number || doc.mobile_no || '',
+    };
+  } catch (error) {
+    console.warn('Default customer could not be resolved:', customerId, error);
+    return null;
+  }
+}
+
 export async function getCurrencyInfo(currencyCode: string): Promise<Currency> {
   const doc = await db.getDoc(DOCTYPES.CURRENCY, currencyCode);
   return doc;
