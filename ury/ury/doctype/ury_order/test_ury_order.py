@@ -4,6 +4,7 @@
 import unittest
 import json
 import frappe
+from datetime import datetime
 from types import SimpleNamespace
 from frappe.tests.utils import FrappeTestCase
 from unittest.mock import patch, MagicMock
@@ -1240,8 +1241,15 @@ class TestTableTransfer(FrappeTestCase):
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_roles")
+    @patch("ury.ury.api.reservation_scheduler.process_reservation_no_shows")
+    @patch(
+        "ury.ury.api.table_reservation.now_datetime",
+        return_value=datetime(2026, 11, 21, 12, 0, 0),
+    )
     def test_allowed_with_transfer_role(
         self,
+        mock_now,
+        mock_reservation_sweep,
         mock_get_roles,
         mock_get_doc,
         mock_has_permission,
