@@ -925,6 +925,40 @@ def _open_shift_for_branch(branch):
     return shift
 
 
+def _default_customer_for(pos_profile):
+    """The POS Profile's default customer, validated, or None.
+
+    New orders fall back to this when the caller does not name a customer.
+    Returns None when the profile does not configure one, so the caller can
+    raise the pre-existing "please enter valid customer details" error. A
+    configured-but-unusable customer (deleted or disabled) raises a
+    configuration error instead of being silently skipped.
+    """
+    customer = getattr(pos_profile, "customer", None)
+    if not customer:
+        return None
+
+    if not frappe.db.exists("Customer", customer):
+        frappe.throw(
+            _(
+                "POS Profile {0} has default customer {1}, which no longer exists. "
+                "Fix the profile before taking orders."
+            ).format(frappe.bold(pos_profile.name), frappe.bold(customer)),
+            title=_("Invalid default customer"),
+        )
+
+    if frappe.db.get_value("Customer", customer, "disabled"):
+        frappe.throw(
+            _(
+                "POS Profile {0} has default customer {1}, which is disabled. "
+                "Fix the profile before taking orders."
+            ).format(frappe.bold(pos_profile.name), frappe.bold(customer)),
+            title=_("Invalid default customer"),
+        )
+
+    return customer
+
+
 def _order_ownership_flags(invoice, pos_profile_name=None):
     """Compute the same is_mine / has_elevated_access / is_billing_user /
     can_view / can_modify booleans that `get_table_order_context()` derives
@@ -1488,10 +1522,15 @@ def sync_order(
             )
             return {"status": "Failure"}
 
+    if not customer and invoice.name:
+        # Updating an existing order: never re-attribute it to the default.
+        customer = invoice.customer
     if not customer:
-        frappe.throw("Please enter valid customer details")
-    else:
-        invoice.customer = customer
+        # Single point where new orders inherit the POS Profile's customer.
+        customer = _default_customer_for(posprofile)
+    if not customer:
+        frappe.throw(_("Please enter valid customer details"))
+    invoice.customer = customer
 
     if order_type:
         invoice.order_type = order_type
