@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { canBill as canBillUser } from '../lib/billing';
 import {
-  checkPOSOpening,
   parseFrappeError,
   validatePOSClose,
   POSOpeningEntryRef,
 } from '../lib/pos-opening-api';
+import { getOpenPosOpeningEntries } from '../lib/pos-closing-api';
 import { getChecklist } from '../lib/checklist-api';
 import { usePOSStore } from '../store/pos-store';
 import { useRootStore } from '../store/root-store';
@@ -15,6 +16,24 @@ import ChecklistGateDialog from './ChecklistGateDialog';
 import POSClosingDialog from './POSClosingDialog';
 import { t } from '../i18n';
 
+/**
+ * Shift gate: no open shift for the branch means no POS screen, for anyone.
+ *
+ * Gating is deliberately NOT route-aware. An earlier version exempted
+ * "non-transactional" routes (dashboard, settings) so they could render
+ * without a shift; that invited exactly the confusion this gate exists to
+ * prevent — a cashier wandering the app with no shift open. Privileged
+ * users still get the open-shift form, captains get a waiting screen, but
+ * nobody sees an app screen until the branch has a shift.
+ *
+ * Captains are routed to /order (and out of the cashier shell) by
+ * `AppLayout`, so "allowed pages for captains" is a routing rule that
+ * applies once the shift is open, never a way past this gate.
+ *
+ * Single-shift only: the branch's first open entry IS the shift, regardless
+ * of POS Profile `custom_enable_multiple_cashier`. That flag must stay OFF;
+ * re-enabling multi-cashier requires restoring the per-user check here.
+ */
 interface POSOpeningProviderProps {
   children: React.ReactNode;
 }
@@ -34,17 +53,6 @@ function hasDeskAccess(user: User | null): boolean {
   return user.roles.some((role) => DESK_ROLES.includes(role));
 }
 
-function normalizeOpenEntries(
-  message: number | POSOpeningEntryRef[]
-): POSOpeningEntryRef[] | null {
-  if (message === 1) return null;
-  if (!Array.isArray(message)) return null;
-  return message.filter(
-    (entry): entry is POSOpeningEntryRef =>
-      !!entry && typeof entry === 'object' && 'name' in entry
-  );
-}
-
 function getHttpStatus(error: unknown): number | undefined {
   if (!error || typeof error !== 'object') return undefined;
   const e = error as Record<string, unknown>;
@@ -59,7 +67,10 @@ const POSOpeningProvider = ({ children }: POSOpeningProviderProps) => {
   const [blockingState, setBlockingState] = useState<OpeningBlockingState | null>(null);
   const [blockingMessage, setBlockingMessage] = useState<string>('');
   const [existingEntry, setExistingEntry] = useState<POSOpeningEntryRef | null>(null);
-  // Set once checkPOSOpening() confirms the POS is open but today's Opening
+  // True when the branch has an open shift (single-shift model) — not when
+  // the session user has one of their own.
+  const [shiftOpen, setShiftOpen] = useState(false);
+  // Set once checkPOSStatus() confirms the POS is open but today's Opening
   // checklist log isn't status="Complete" yet. Takes priority over the
   // daily-close check below -- the cashier must clear the checklist before
   // we even look at whether a previous session needs closing.
@@ -73,6 +84,11 @@ const POSOpeningProvider = ({ children }: POSOpeningProviderProps) => {
   const { user } = useRootStore();
 
   const canAccessDesk = useMemo(() => hasDeskAccess(user), [user]);
+
+  // Billing user = holds a role listed in the POS Profile's "Role Allowed
+  // For Billing" (plus the admin exemption). Only they may open/close a
+  // shift; captains never do.
+  const canBill = useMemo(() => canBillUser(user, posProfile), [user, posProfile]);
 
   const clearBlockingState = useCallback(() => {
     setBlockingState(null);
@@ -94,64 +110,22 @@ const POSOpeningProvider = ({ children }: POSOpeningProviderProps) => {
     setIsLoading(true);
     clearBlockingState();
     setExistingEntry(null);
+    setShiftOpen(false);
     setNeedsOpeningChecklist(false);
 
     try {
-      const response = await checkPOSOpening(user?.name);
+      // Single-shift model: the shift belongs to the branch, not to the
+      // session user. Captains and joiners work under whatever shift the
+      // branch has open; only billing users can open/close one.
+      const entries = await getOpenPosOpeningEntries(posProfile.name);
+      const shift = entries?.[0] ?? null;
 
-      // No open entry for this user -> show the native opening screen.
-      if (response.message === 1) {
-        if (posProfile.custom_daily_pos_close === 1) {
-          const closeResponse = await validatePOSClose(posProfile.name);
-          if (closeResponse.message === 'Failed') {
-            setBlockingState('dailyClosePending');
-            setIsLoading(false);
-            return;
-          }
-        }
-        setIsLoading(false);
-        return;
-      }
+      setShiftOpen(Boolean(shift));
+      setExistingEntry(shift);
 
-      const entries = normalizeOpenEntries(response.message);
-      if (!entries || entries.length === 0) {
-        setIsLoading(false);
-        return;
-      }
-
-      // `branch` is intentionally NOT part of this comparison: the backing
-      // API here (ERPNext's standard `check_opening_entry`) never returns a
-      // `branch` field at all -- confirmed live, its response only ever
-      // carries `name`/`company`/`pos_profile`/`period_start_date`. Requiring
-      // it to match meant `entry.branch === posProfile.branch` was
-      // `undefined === "<real branch>"`, always false, so this fired a false
-      // "Open Session Elsewhere" block for every single cashier immediately
-      // after every successful open. `company` + `pos_profile` alone is a
-      // correct match in this app's data model (one POS Profile always
-      // belongs to exactly one branch).
-      const matchingEntry =
-        entries.find(
-          (entry) =>
-            entry.pos_profile === posProfile.name &&
-            entry.company === posProfile.company
-        ) || entries[0];
-
-      setExistingEntry(matchingEntry);
-
-      const isSameContext =
-        matchingEntry.company === posProfile.company &&
-        matchingEntry.pos_profile === posProfile.name;
-
-      if (!isSameContext) {
-        setBlockingState('crossCompanyOpen');
-        setIsLoading(false);
-        return;
-      }
-
-      // Gate on the Opening checklist before the daily-close check below --
-      // the cashier must clear it before we look at whether a previous
-      // session needs closing.
-      if (posProfile.name) {
+      // Opening checklist + daily-close only concern the cashier/manager
+      // who opens or works the shift. Captains are never sent through them.
+      if (canBill && posProfile.name) {
         try {
           const { logStatus } = await getChecklist(posProfile.name, 'Opening');
           if (logStatus !== 'Complete') {
@@ -166,14 +140,14 @@ const POSOpeningProvider = ({ children }: POSOpeningProviderProps) => {
           setIsLoading(false);
           return;
         }
-      }
 
-      if (posProfile.custom_daily_pos_close === 1) {
-        const closeResponse = await validatePOSClose(posProfile.name);
-        if (closeResponse.message === 'Failed') {
-          setBlockingState('dailyClosePending');
-          setIsLoading(false);
-          return;
+        if (posProfile.custom_daily_pos_close === 1) {
+          const closeResponse = await validatePOSClose(posProfile.name);
+          if (closeResponse.message === 'Failed') {
+            setBlockingState('dailyClosePending');
+            setIsLoading(false);
+            return;
+          }
         }
       }
 
@@ -199,7 +173,7 @@ const POSOpeningProvider = ({ children }: POSOpeningProviderProps) => {
 
       setIsLoading(false);
     }
-  }, [posProfile, user?.name, clearBlockingState]);
+  }, [posProfile, canBill, clearBlockingState]);
 
   const handleOpeningSuccess = useCallback(() => {
     clearBlockingState();
@@ -216,6 +190,19 @@ const POSOpeningProvider = ({ children }: POSOpeningProviderProps) => {
       checkPOSStatus();
     }
   }, [posProfile, checkPOSStatus]);
+
+  const voluntaryClosing = showVoluntaryClosing ? (
+    <POSClosingDialog
+      open={showVoluntaryClosing}
+      onOpenChange={(open) => {
+        if (!open) setShowVoluntaryClosing(false);
+      }}
+      onClosingSubmitted={() => {
+        setShowVoluntaryClosing(false);
+        checkPOSStatus();
+      }}
+    />
+  ) : null;
 
   if (isLoading) {
     return (
@@ -272,7 +259,11 @@ const POSOpeningProvider = ({ children }: POSOpeningProviderProps) => {
     );
   }
 
-  if (!existingEntry) {
+  if (!shiftOpen) {
+    // Captains never open shifts: if the branch has no shift, they wait.
+    if (!canBill) {
+      return <ShiftWaitingScreen onRetry={checkPOSStatus} />;
+    }
     return (
       <POSOpeningScreen
         onSuccess={handleOpeningSuccess}
@@ -284,28 +275,32 @@ const POSOpeningProvider = ({ children }: POSOpeningProviderProps) => {
   return (
     <>
       {children}
-      {/*
-        Voluntary close (Header menu "Close Shift"), distinct from the
-        dailyClosePending forced path above. Rendered as an overlay
-        alongside children -- rather than replacing them, like the forced
-        path does -- since the cashier is choosing to close their own
-        current, non-stale session and should be able to back out without
-        losing their place in the app.
-      */}
-      {showVoluntaryClosing && (
-        <POSClosingDialog
-          open={showVoluntaryClosing}
-          onOpenChange={(open) => {
-            if (!open) setShowVoluntaryClosing(false);
-          }}
-          onClosingSubmitted={() => {
-            setShowVoluntaryClosing(false);
-            checkPOSStatus();
-          }}
-        />
-      )}
+      {voluntaryClosing}
     </>
   );
 };
+
+/**
+ * Shown to non-billing users (captains) when the branch has no open shift.
+ * They cannot open one — they wait for the cashier or manager.
+ */
+const ShiftWaitingScreen = ({ onRetry }: { onRetry: () => void }) => (
+  <div className="fixed inset-0 bg-white flex items-center justify-center z-50 px-6">
+    <div className="text-center max-w-sm">
+      <div className="text-4xl mb-3">🔒</div>
+      <h2 className="text-xl font-semibold text-gray-800 mb-2">
+        {t('pos_opening.shift_not_open_title')}
+      </h2>
+      <p className="text-gray-600 mb-6">{t('pos_opening.shift_not_open_body')}</p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="px-4 py-2 rounded-lg bg-blue-600 text-white font-medium"
+      >
+        {t('pos_opening.retry')}
+      </button>
+    </div>
+  </div>
+);
 
 export default POSOpeningProvider;

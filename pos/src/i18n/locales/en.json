@@ -144,7 +144,9 @@
     "opening_balance_help": "Opening Balance is the starting cash/payment amount you're declaring for this shift. It's used to reconcile against sales when you close out.",
     "zero_balance_warning": "You're opening with ₹0 across all payment modes. Tap \"Confirm & Open\" again to continue anyway.",
     "confirm_zero_balance": "Confirm & Open",
-    "session_opened_success": "POS session opened"
+    "session_opened_success": "POS session opened",
+    "shift_not_open_title": "Shift not open yet",
+    "shift_not_open_body": "The cashier or manager needs to open the shift before orders can be taken."
   },
   "pos_closing": {
     "title": "Close POS",
