@@ -1,11 +1,117 @@
 import frappe
+from frappe import _
 
 def before_save(doc, method):
     sub_pos_close_check(doc, method)
 
 def validate(doc, method):
+    populate_pos_transactions(doc, method)
     calculate_closing_amount(doc, method)
     validate_cashier(doc, method)
+    validate_no_open_orders(doc, method)
+
+
+def populate_pos_transactions(doc, method=None):
+    """Fill `pos_transactions` from the shift's submitted invoices.
+
+    The POS frontend creates the closing without them (and ERPNext's Desk JS
+    is the only other writer), so without this the closing carries no invoice
+    list and nothing gets consolidated on submit. In the single-shift model
+    every invoice is owned by the opener, so selecting by `owner` collects
+    everything the captains took during the shift.
+    """
+    if doc.pos_transactions:
+        return
+
+    if frappe.db.get_value("POS Profile", doc.pos_profile, "custom_enable_multiple_cashier"):
+        return
+
+    if not (doc.pos_profile and doc.user and doc.period_start_date):
+        return
+
+    invoices = frappe.get_all(
+        "POS Invoice",
+        filters={
+            "docstatus": 1,
+            "pos_profile": doc.pos_profile,
+            "owner": doc.user,
+            "posting_date": [
+                "between",
+                [doc.period_start_date, doc.period_end_date or frappe.utils.now()],
+            ],
+        },
+        fields=[
+            "name",
+            "posting_date",
+            "customer",
+            "grand_total",
+            "is_return",
+            "return_against",
+            "consolidated_invoice",
+        ],
+    )
+
+    for invoice in invoices:
+        if invoice.consolidated_invoice:
+            continue
+        doc.append(
+            "pos_transactions",
+            {
+                "pos_invoice": invoice.name,
+                "posting_date": invoice.posting_date,
+                "customer": invoice.customer,
+                "grand_total": invoice.grand_total,
+                "is_return": invoice.is_return,
+                "return_against": invoice.return_against,
+            },
+        )
+
+    # Server-computed totals, so the closing is correct even when the client
+    # didn't compute them (e.g. a manager closing someone else's shift).
+    if doc.pos_transactions and not doc.grand_total:
+        doc.total_quantity = sum(
+            frappe.db.get_value("POS Invoice", row.pos_invoice, "total_qty") or 0
+            for row in doc.pos_transactions
+        )
+        doc.grand_total = sum(row.grand_total or 0 for row in doc.pos_transactions)
+        doc.net_total = sum(
+            frappe.db.get_value("POS Invoice", row.pos_invoice, "net_total") or 0
+            for row in doc.pos_transactions
+        )
+
+
+def validate_no_open_orders(doc, method=None):
+    """Refuse to close while the branch still has unbilled orders.
+
+    In the single-shift model every POS Invoice belongs to the branch's open
+    shift (owner = opener). A draft left behind when the shift closes would
+    never appear in any closing, so its revenue would silently disappear.
+    Multi-cashier closes keep their existing per-cashier behaviour.
+    """
+    if frappe.db.get_value("POS Profile", doc.pos_profile, "custom_enable_multiple_cashier"):
+        return
+
+    branch = frappe.db.get_value("POS Profile", doc.pos_profile, "branch")
+    if not branch:
+        return
+
+    drafts = frappe.get_all(
+        "POS Invoice",
+        filters={"branch": branch, "docstatus": 0},
+        fields=["restaurant_table"],
+        limit=50,
+    )
+    if not drafts:
+        return
+
+    tables = sorted({(d.restaurant_table or _("No table")) for d in drafts})
+    frappe.throw(
+        _(
+            "Cannot close: these tables still have unbilled orders — {0}. "
+            "Bill or cancel them first."
+        ).format(", ".join(tables)),
+        title=_("Unbilled Orders"),
+    )
 
 def on_submit(doc, method=None):
     update_branch_avg_times(doc)
