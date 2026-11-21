@@ -33,6 +33,11 @@ The person who took a specific order. Recorded on the invoice and preserved
 regardless of who owns the shift.
 _Avoid_: Captain (the role), user
 
+**Default customer**:
+The customer a new order starts on, taken from the POS Profile. Still editable
+per order.
+_Avoid_: Walk-in (a value, not the concept), house customer, default guest
+
 **Draft**:
 An order that has been taken but not yet paid for.
 _Avoid_: Open order, held bill, pending invoice

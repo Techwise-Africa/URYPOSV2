@@ -1,8 +1,8 @@
 # Gotchas
 
 Traps worth knowing before changing POS behaviour in this app. For the
-narrative version — objective, decisions, flow — see
-`docs/single-shift-model.md`.
+narrative versions — objective, decisions, flow — see
+`docs/single-shift-model.md` and `docs/default-customer.md`.
 
 ## `custom_enable_multiple_cashier` must stay OFF
 
@@ -55,6 +55,29 @@ If that ever needs to change, the lever is the four-line guard in
 shell again, or keep it and restyle `CaptainTables` instead. Do not assume the
 captain screen lost features: nothing under `pos/src/captain/` was ever
 modified by us, so an upstream rebase will not resurrect a "missing" UI.
+
+## Default customer is a prefill, not a rule
+
+New orders start on `POS Profile.customer` — resolved once by
+`resolveDefaultCustomer` in `pos/src/lib/pos-profile-api.ts`, seeded by
+`applyProfileDefaults` in the store, and enforced server-side by
+`_default_customer_for` in `sync_order`.
+
+It seeds **new orders only**. An existing invoice keeps its customer, Aggregator
+orders use the aggregator's customer, and the picker stays editable. Do not
+turn the seed into a reactive "if empty, refill": the Change button clears the
+field on purpose, and a deliberate clear must survive until the next new order.
+
+The profile field may be empty; then the picker starts blank as before. A
+configured-but-disabled or deleted customer blocks the order with a
+configuration error naming the profile — it is never silently skipped.
+
+`URY Self Ordering Profile` has its own `default_customer` for QR/kiosk orders.
+Two separate defaults by design; do not merge them.
+
+The client sends `""` rather than omitting `customer`; `sync_order`'s signature
+still requires the argument, so a caller that omits the key gets a raw
+`TypeError` before any default logic runs.
 
 ## Opening checklist is per profile per day
 

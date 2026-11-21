@@ -219,3 +219,5 @@ confirmed manually per user role.
   opener.
 - `docs/gotchas.md` — operational traps: multi-cashier flag, owner meaning, the
   missing production-units endpoint, captain routing, checklist timing.
+- `docs/default-customer.md` — how new orders inherit the POS Profile's
+  customer.
