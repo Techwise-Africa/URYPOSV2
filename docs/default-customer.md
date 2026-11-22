@@ -167,3 +167,4 @@ sending is blocked; an empty or disabled profile default behaves as above.
   closing.
 - `docs/gotchas.md` — operational traps, including this feature's prefill
   semantics.
+- `docs/kot-printing.md` — the KOT slip printed for each send.

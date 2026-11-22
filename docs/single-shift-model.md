@@ -221,3 +221,5 @@ confirmed manually per user role.
   missing production-units endpoint, captain routing, checklist timing.
 - `docs/default-customer.md` — how new orders inherit the POS Profile's
   customer.
+- `docs/kot-printing.md` — how a send prints the browser KOT slip without
+  advancing the bill.

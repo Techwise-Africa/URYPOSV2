@@ -2,7 +2,29 @@
 
 Traps worth knowing before changing POS behaviour in this app. For the
 narrative versions — objective, decisions, flow — see
-`docs/single-shift-model.md` and `docs/default-customer.md`.
+`docs/single-shift-model.md`, `docs/default-customer.md` and
+`docs/kot-printing.md`.
+
+## Printing the bill is a state change, not a print
+
+`printOrder()` ends in `updatePrintStatus()` → `qz_print_update()`, which sets
+`POS Invoice.invoice_printed = 1` and releases merged tables. The POS maps that
+flag to **Unbilled**, and `sync_order` then refuses non-billing users from
+editing the order.
+
+So an order ticket must never reuse the invoice-print path. KOT printing goes
+through `URY KOT` (`get_combined_kot_print_html` in
+`ury/ury/api/ury_waiter_print.py`) and writes nothing. If a future feature needs
+a "print but don't bill" path, copy the KOT endpoint, not `printOrder`.
+
+## Desk, not the app file, is the print-format source
+
+The shipped `URY Waiter Order Slip` record has `standard: "No"`, so the copy in
+`ury/ury/print_format/` is only a seed. Editing that JSON changes nothing at
+runtime. Edit the Print Format in Desk, or create one there and press **Set as
+Default** — `frappe.get_print()` re-reads the record and recompiles its HTML on
+every request, so the next KOT send uses the change with no build, migrate or
+restart.
 
 ## `custom_enable_multiple_cashier` must stay OFF
 

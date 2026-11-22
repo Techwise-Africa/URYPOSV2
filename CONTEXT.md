@@ -33,6 +33,11 @@ The person who took a specific order. Recorded on the invoice and preserved
 regardless of who owns the shift.
 _Avoid_: Captain (the role), user
 
+**KOT slip**:
+The kitchen/waiter ticket for the items a send actually changed. Printed from
+`URY KOT`, never from the POS Invoice.
+_Avoid_: Kitchen receipt, order slip (ambiguous with the bill), ticket
+
 **Default customer**:
 The customer a new order starts on, taken from the POS Profile. Still editable
 per order.
