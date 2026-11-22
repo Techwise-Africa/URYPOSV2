@@ -4,6 +4,7 @@
 import unittest
 import json
 import frappe
+from datetime import datetime
 from types import SimpleNamespace
 from frappe.tests.utils import FrappeTestCase
 from unittest.mock import patch, MagicMock
@@ -39,13 +40,19 @@ class TestURYOrderSEC11(FrappeTestCase):
             get_order_invoice(invoiceNo="POS-INV-001")
         self.assertIn("outside your active branch", str(context.exception))
 class TestURYOrder(FrappeTestCase):
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.db.set_value")
+    @patch("ury.ury.doctype.ury_order.ury_order.kot_execute")
     @patch("ury.ury.doctype.ury_order.ury_order.get_order_invoice")
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order._open_shift_for_branch",
+        return_value=SimpleNamespace(name="POS-OPE-0001", user="opener@example.com"),
+    )
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.db.get_value")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_roles")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.session")
-    def test_sync_order_authorized(self, mock_session, mock_get_roles, mock_get_doc, mock_get_value, mock_has_permission, mock_get_order_invoice):
+    def test_sync_order_authorized(self, mock_session, mock_get_roles, mock_get_doc, mock_get_value, mock_has_permission, mock_shift, mock_get_order_invoice, mock_kot, mock_set_value):
         # Setup mock invoice
         mock_invoice = MagicMock()
         mock_invoice.name = "POS-INV-001"
@@ -54,6 +61,8 @@ class TestURYOrder(FrappeTestCase):
         mock_invoice.invoice_printed = 0
         mock_invoice.items = []
         mock_invoice.waiter = "existing_waiter"
+        mock_invoice.as_dict.return_value = {"name": "POS-INV-001"}
+        mock_kot.return_value = ["KOT-1"]
 
         mock_get_order_invoice.return_value = mock_invoice
 
@@ -66,7 +75,7 @@ class TestURYOrder(FrappeTestCase):
         mock_pos_profile.custom_enable_multiple_cashier = 0
         mock_pos_profile.applicable_for_users = []
         mock_pos_profile.transfer_role_permissions = _role_rows("URY Manager")
-        mock_pos_profile.role_allowed_for_billing = _role_rows()
+        mock_pos_profile.role_allowed_for_billing = _role_rows("URY Manager")
         mock_pos_profile.role_restricted_for_table_order = _role_rows()
         mock_get_doc.return_value = mock_pos_profile
 
@@ -82,37 +91,38 @@ class TestURYOrder(FrappeTestCase):
         try:
             # We mock frappe.db.sql as well in another patch if needed
             with patch("ury.ury.doctype.ury_order.ury_order.frappe.db.sql") as mock_sql:
-                # We expect this to not raise a PermissionError
-                # It might raise other errors due to missing items etc, but we just want to ensure
-                # it passes the permission check.
-                # Actually, let's catch everything and just assert has_permission was called.
-                try:
-                    sync_order(
-                        items="[]",
-                        cashier="fake_cashier",
-                        owner="fake_owner",
-                        mode_of_payment="Cash",
-                        customer="Test Customer",
-                        no_of_pax=2,
-                        last_invoice=None,
-                        waiter="fake_waiter",
-                        pos_profile="Test Profile"
-                    )
-                except Exception as e:
-                    pass
-                
+                response = sync_order(
+                    items="[]",
+                    cashier="fake_cashier",
+                    owner="fake_owner",
+                    mode_of_payment="Cash",
+                    customer="Test Customer",
+                    no_of_pax=2,
+                    last_invoice=None,
+                    waiter="fake_waiter",
+                    pos_profile="Test Profile"
+                )
+
                 mock_has_permission.assert_called_once_with("POS Invoice", "write", doc=mock_invoice)
-                
-                # Verify fake cashier/waiter were ignored
-                self.assertEqual(mock_invoice.cashier, "authorized@example.com")
+
+                # Verify the caller-supplied cashier/waiter were ignored.
+                # One-shift-per-branch: cashier comes from the branch's open
+                # shift (its opener), never from the request or the session.
+                self.assertEqual(mock_invoice.cashier, "opener@example.com")
                 # Waiter should remain "existing_waiter" because it was an existing invoice and we don't overwrite
                 self.assertEqual(mock_invoice.waiter, "existing_waiter")
+                # The delta KOTs created by this send travel back with the
+                # invoice, so the POS can print exactly the browser slip.
+                self.assertEqual(response["name"], "POS-INV-001")
+                self.assertEqual(response["kot_names"], ["KOT-1"])
         except Exception as e:
             self.fail(f"Test failed with {e}")
 
     @patch("ury.ury.doctype.ury_order.ury_order.get_order_invoice")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission")
-    def test_sync_order_unauthorized(self, mock_has_permission, mock_get_order_invoice):
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
+    def test_sync_order_unauthorized(self, mock_get_doc, mock_has_permission, mock_get_order_invoice):
+        mock_get_doc.return_value = _make_pos_profile()
         mock_invoice = MagicMock()
         mock_invoice.name = "POS-INV-001"
         mock_get_order_invoice.return_value = mock_invoice
@@ -134,11 +144,15 @@ class TestURYOrder(FrappeTestCase):
             )
 
     @patch("ury.ury.doctype.ury_order.ury_order.get_order_invoice")
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order._open_shift_for_branch",
+        return_value=SimpleNamespace(name="POS-OPE-0001", user="opener@example.com"),
+    )
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.db.get_value")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.session")
-    def test_sync_order_fake_cashier_waiter_new_invoice(self, mock_session, mock_get_doc, mock_get_value, mock_has_permission, mock_get_order_invoice):
+    def test_sync_order_fake_cashier_waiter_new_invoice(self, mock_session, mock_get_doc, mock_get_value, mock_has_permission, mock_shift, mock_get_order_invoice):
         # Setup new invoice
         mock_invoice = MagicMock()
         mock_invoice.name = None # New invoice
@@ -173,8 +187,10 @@ class TestURYOrder(FrappeTestCase):
             except Exception:
                 pass
             
-            # Waiter and cashier should be set to session user, ignoring "fake_waiter" and "fake_cashier"
-            self.assertEqual(mock_invoice.cashier, "newuser@example.com")
+            # Caller-supplied cashier/waiter are ignored. One-shift-per-branch:
+            # the cashier is the branch shift's opener; a brand-new invoice's
+            # waiter is the session user who took the order.
+            self.assertEqual(mock_invoice.cashier, "opener@example.com")
             self.assertEqual(mock_invoice.waiter, "newuser@example.com")
 
 
@@ -191,10 +207,12 @@ def _make_pos_profile(
     show_image=0,
     custom_enable_kot_reprint=0,
     custom_enable_multiple_cashier=0,
+    customer=None,
     name="Test POS Profile",
 ):
     profile = MagicMock()
     profile.name = name
+    profile.customer = customer
     profile.transfer_role_permissions = _role_rows(*transfer_role_permissions)
     profile.role_allowed_for_billing = _role_rows(*role_allowed_for_billing)
     profile.role_restricted_for_table_order = _role_rows(*role_restricted_for_table_order)
@@ -768,6 +786,10 @@ class TestSyncOrderHardening(FrappeTestCase):
 
     @patch("ury.ury.doctype.ury_order.ury_order._reconcile_invoice_merged_tables")
     @patch("ury.ury.doctype.ury_order.ury_order.get_order_invoice")
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order._open_shift_for_branch",
+        return_value=SimpleNamespace(name="POS-OPE-0001", user="opener@example.com"),
+    )
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.db.get_value")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
@@ -780,6 +802,7 @@ class TestSyncOrderHardening(FrappeTestCase):
         mock_get_doc,
         mock_db_get_value,
         mock_has_permission,
+        mock_shift,
         mock_get_order_invoice,
         mock_reconcile,
     ):
@@ -835,6 +858,245 @@ class TestSyncOrderHardening(FrappeTestCase):
         self.assertIn(
             "not permitted to reduce or remove items", str(context.exception)
         )
+
+
+class TestSyncOrderDefaultCustomer(FrappeTestCase):
+    """New orders that name no customer inherit `POS Profile.customer`;
+    updates keep the invoice's existing customer. Clients send an empty
+    string rather than omitting the argument (the signature still requires
+    it), so `""` is the input under test.
+
+    Each test lets sync_order run until the deliberately-tripped POS-closed
+    guard, which sits *after* customer resolution, then asserts the invoice
+    mutation that happened first.
+    """
+
+    def _invoice(self, name=None, customer=None):
+        invoice = MagicMock()
+        invoice.name = name
+        invoice.customer = customer
+        invoice.waiter = "cashier@example.com"
+        invoice.invoice_printed = 0
+        invoice.branch = "Test Branch"
+        return invoice
+
+    def _profile(self, customer):
+        return _make_pos_profile(
+            role_allowed_for_billing=["URY Cashier"], customer=customer
+        )
+
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order._open_shift_for_branch",
+        return_value=None,
+    )
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.db.get_value", return_value=0)
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.db.exists", return_value=True)
+    @patch("ury.ury.doctype.ury_order.ury_order.get_order_invoice")
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission", return_value=True)
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order.frappe.get_roles",
+        return_value=["URY Cashier"],
+    )
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.session")
+    def test_new_order_uses_profile_default_customer(
+        self,
+        mock_session,
+        _mock_roles,
+        mock_get_doc,
+        _mock_permission,
+        mock_get_invoice,
+        _mock_exists,
+        _mock_get_value,
+        _mock_shift,
+    ):
+        mock_session.user = "cashier@example.com"
+        invoice = self._invoice(name=None)
+        mock_get_invoice.return_value = invoice
+        mock_get_doc.return_value = self._profile("Walk-In")
+
+        with self.assertRaises(frappe.ValidationError) as context:
+            sync_order(
+                items=[],
+                cashier="fake_cashier",
+                owner="fake_owner",
+                mode_of_payment="Cash",
+                customer="",
+                no_of_pax=2,
+                last_invoice=None,
+                waiter="fake_waiter",
+                pos_profile="Test Profile",
+            )
+
+        self.assertIn("POS is closed", str(context.exception))
+        self.assertEqual(invoice.customer, "Walk-In")
+
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order._open_shift_for_branch",
+        return_value=None,
+    )
+    @patch("ury.ury.doctype.ury_order.ury_order.get_order_invoice")
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission", return_value=True)
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order.frappe.get_roles",
+        return_value=["URY Cashier"],
+    )
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.session")
+    def test_update_keeps_existing_invoice_customer(
+        self,
+        mock_session,
+        _mock_roles,
+        mock_get_doc,
+        _mock_permission,
+        mock_get_invoice,
+        _mock_shift,
+    ):
+        mock_session.user = "cashier@example.com"
+        invoice = self._invoice(name="POS-INV-001", customer="Rahul")
+        mock_get_invoice.return_value = invoice
+        mock_get_doc.return_value = self._profile("Walk-In")
+
+        with self.assertRaises(frappe.ValidationError):
+            sync_order(
+                items=[],
+                cashier="fake_cashier",
+                owner="fake_owner",
+                mode_of_payment="Cash",
+                customer="",
+                no_of_pax=2,
+                last_invoice=None,
+                waiter="fake_waiter",
+                pos_profile="Test Profile",
+            )
+
+        self.assertEqual(invoice.customer, "Rahul")
+
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order._open_shift_for_branch",
+        return_value=None,
+    )
+    @patch("ury.ury.doctype.ury_order.ury_order.get_order_invoice")
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission", return_value=True)
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order.frappe.get_roles",
+        return_value=["URY Cashier"],
+    )
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.session")
+    def test_explicit_customer_wins_over_default(
+        self,
+        mock_session,
+        _mock_roles,
+        mock_get_doc,
+        _mock_permission,
+        mock_get_invoice,
+        _mock_shift,
+    ):
+        mock_session.user = "cashier@example.com"
+        invoice = self._invoice(name=None)
+        mock_get_invoice.return_value = invoice
+        mock_get_doc.return_value = self._profile("Walk-In")
+
+        with self.assertRaises(frappe.ValidationError):
+            sync_order(
+                items=[],
+                cashier="fake_cashier",
+                owner="fake_owner",
+                mode_of_payment="Cash",
+                customer="Rahul",
+                no_of_pax=2,
+                last_invoice=None,
+                waiter="fake_waiter",
+                pos_profile="Test Profile",
+            )
+
+        self.assertEqual(invoice.customer, "Rahul")
+
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order._open_shift_for_branch",
+        return_value=None,
+    )
+    @patch("ury.ury.doctype.ury_order.ury_order.get_order_invoice")
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission", return_value=True)
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order.frappe.get_roles",
+        return_value=["URY Cashier"],
+    )
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.session")
+    def test_missing_default_customer_raises_clear_error(
+        self,
+        mock_session,
+        _mock_roles,
+        mock_get_doc,
+        _mock_permission,
+        mock_get_invoice,
+        _mock_shift,
+    ):
+        mock_session.user = "cashier@example.com"
+        mock_get_invoice.return_value = self._invoice(name=None)
+        mock_get_doc.return_value = self._profile(None)
+
+        with self.assertRaises(frappe.ValidationError) as context:
+            sync_order(
+                items=[],
+                cashier="fake_cashier",
+                owner="fake_owner",
+                mode_of_payment="Cash",
+                customer="",
+                no_of_pax=2,
+                last_invoice=None,
+                waiter="fake_waiter",
+                pos_profile="Test Profile",
+            )
+
+        self.assertIn("Please enter valid customer details", str(context.exception))
+
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order._open_shift_for_branch",
+        return_value=None,
+    )
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.db.get_value", return_value=1)
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.db.exists", return_value=True)
+    @patch("ury.ury.doctype.ury_order.ury_order.get_order_invoice")
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission", return_value=True)
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
+    @patch(
+        "ury.ury.doctype.ury_order.ury_order.frappe.get_roles",
+        return_value=["URY Cashier"],
+    )
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.session")
+    def test_disabled_default_customer_raises_clear_error(
+        self,
+        mock_session,
+        _mock_roles,
+        mock_get_doc,
+        _mock_permission,
+        mock_get_invoice,
+        _mock_exists,
+        _mock_get_value,
+        _mock_shift,
+    ):
+        mock_session.user = "cashier@example.com"
+        mock_get_invoice.return_value = self._invoice(name=None)
+        mock_get_doc.return_value = self._profile("Walk-In")
+
+        with self.assertRaises(frappe.ValidationError) as context:
+            sync_order(
+                items=[],
+                cashier="fake_cashier",
+                owner="fake_owner",
+                mode_of_payment="Cash",
+                customer="",
+                no_of_pax=2,
+                last_invoice=None,
+                waiter="fake_waiter",
+                pos_profile="Test Profile",
+            )
+
+        self.assertIn("which is disabled", str(context.exception))
+        self.assertIn("Test POS Profile", str(context.exception))
 
 
 class TestGetOrderInvoiceOwnership(FrappeTestCase):
@@ -979,8 +1241,15 @@ class TestTableTransfer(FrappeTestCase):
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.has_permission")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_roles")
+    @patch("ury.ury.api.reservation_scheduler.process_reservation_no_shows")
+    @patch(
+        "ury.ury.api.table_reservation.now_datetime",
+        return_value=datetime(2026, 11, 21, 12, 0, 0),
+    )
     def test_allowed_with_transfer_role(
         self,
+        mock_now,
+        mock_reservation_sweep,
         mock_get_roles,
         mock_get_doc,
         mock_has_permission,

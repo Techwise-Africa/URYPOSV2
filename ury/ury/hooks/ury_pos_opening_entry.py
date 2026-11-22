@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 from frappe.utils import today
 from frappe.utils import  get_datetime,today,now
 
@@ -8,6 +9,38 @@ def validate(doc,method):
 def before_save(doc, method):
     main_pos_open_check(doc, method)
     set_current_time(doc,method)
+
+
+def validate_single_shift_per_branch(doc, method=None):
+    """One shift per branch (single-cashier mode).
+
+    Runs on submit (before_submit). Captains and joiners work under the
+    branch's open shift instead of opening their own, so "the open shift"
+    must be unambiguous: every POS Invoice is stamped with that shift's
+    opener. Multi-cashier profiles keep their existing main/sub topology.
+    """
+    if frappe.db.get_value("POS Profile", doc.pos_profile, "custom_enable_multiple_cashier"):
+        return
+
+    existing = frappe.get_all(
+        "POS Opening Entry",
+        filters={
+            "branch": doc.branch,
+            "status": "Open",
+            "docstatus": 1,
+            "name": ["!=", doc.name],
+        },
+        pluck="name",
+        limit=1,
+    )
+
+    if existing:
+        frappe.throw(
+            _(
+                "Branch {0} already has an open shift ({1}). Close it before opening a new one."
+            ).format(frappe.bold(doc.branch), frappe.bold(existing[0])),
+            title=_("Shift Already Open"),
+        )
     
     
 def set_cashier_room(doc,method):

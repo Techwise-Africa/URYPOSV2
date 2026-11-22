@@ -208,13 +208,18 @@ const POSClosingDialog = ({ open, onOpenChange, onClosingSubmitted }: POSClosing
     try {
       const openEntries = await getOpenPosOpeningEntries(posProfile.name);
       const ownEntry = openEntries.find((entry) => entry.user === user.name) ?? null;
+      // Single-shift model: any billing user may close the branch's open
+      // shift, and the closing is recorded under its opener (the invoice
+      // owner). Multi-cashier keeps its per-user semantics.
+      const shiftEntry =
+        posProfile.multiple_cashier === 1 ? ownEntry : (openEntries[0] ?? null);
 
-      if (!ownEntry) {
+      if (!shiftEntry) {
         setOpeningEntry(null);
         setLoadError(t('pos_closing.no_open_entry'));
         return;
       }
-      setOpeningEntry(ownEntry);
+      setOpeningEntry(shiftEntry);
 
       // Multi-cashier mode + current user is not the POS Profile's main
       // cashier => this session closes via Sub POS Closing.
@@ -251,9 +256,9 @@ const POSClosingDialog = ({ open, onOpenChange, onClosingSubmitted }: POSClosing
 
       const [invoices, openingDoc] = await Promise.all([
         subCashier
-          ? getSubCashierPosInvoices(ownEntry.period_start_date, end, posProfile.name, user.name)
-          : getMainCashierPosInvoices(ownEntry.period_start_date, end, posProfile.name, user.name),
-        db.getDoc<OpeningEntryDoc>('POS Opening Entry', ownEntry.name),
+          ? getSubCashierPosInvoices(shiftEntry.period_start_date, end, posProfile.name, shiftEntry.user)
+          : getMainCashierPosInvoices(shiftEntry.period_start_date, end, posProfile.name, shiftEntry.user),
+        db.getDoc<OpeningEntryDoc>('POS Opening Entry', shiftEntry.name),
       ]);
 
       setInvoiceCount(invoices.length);
@@ -383,7 +388,7 @@ const POSClosingDialog = ({ open, onOpenChange, onClosingSubmitted }: POSClosing
           const doc = await createPosClosingEntry({
             pos_profile: posProfile.name,
             pos_opening_entry: openingEntry.name,
-            user: user.name,
+            user: openingEntry.user,
             company: posProfile.company,
             period_start_date: openingEntry.period_start_date,
             period_end_date: formatDateTime(periodEndDate),

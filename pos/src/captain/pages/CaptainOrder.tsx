@@ -7,12 +7,14 @@ import { usePOSStore } from '../../store/pos-store';
 import { useRootStore, RootState } from '../../store/root-store';
 import {
   captainTransfer,
+  isSyncOrderFailure,
   reprintKot,
   syncOrder,
   SyncOrderRequest,
   tableTransfer,
 } from '../../lib/order-api';
 import { printOrder } from '../../lib/print';
+import { printKotSlip } from '../../lib/kot-print';
 import { resolvePrintFormat } from '../../lib/invoice-api';
 import { getVacantTablesForBranch, Table } from '../../lib/table-api';
 import { DINE_IN } from '../../data/order-types';
@@ -187,10 +189,9 @@ export default function CaptainOrder() {
         showToast.error('Add at least one item before sending the order.');
         return;
       }
-      // sync_order requires `customer` as a hard backend parameter (found via
-      // live E2E test — a 500 "missing 1 required positional argument:
-      // 'customer'" — not just a Cashier-UI convention). Match OrderPanel's
-      // exact validate-before-submit gate rather than only omitting the field.
+      // The store prefills the POS Profile's default customer for new orders;
+      // clearing it deliberately blocks the send rather than silently billing
+      // the default. Aggregator orders use the aggregator's customer instead.
       if (!selectedCustomer?.name) {
         showToast.error('Please select a customer before sending the order.');
         return;
@@ -211,7 +212,7 @@ export default function CaptainOrder() {
         order_type: DINE_IN,
         table,
         room: selectedRoom || undefined,
-        customer: selectedCustomer.name,
+        customer: selectedCustomer?.name ?? '',
         cashier: posProfile.cashier,
         owner: posProfile.owner,
         mode_of_payment: paymentModes[0],
@@ -224,7 +225,8 @@ export default function CaptainOrder() {
 
       const result = await syncOrder(orderData);
 
-      if (result?.message && typeof result.message === 'object' && 'status' in result.message && result.message.status === 'Failure') {
+      const synced = result?.message;
+      if (isSyncOrderFailure(synced)) {
         showToast.error(
           isUpdatingOrder
             ? 'This order was modified by someone else. Please reopen the table and try again.'
@@ -233,9 +235,19 @@ export default function CaptainOrder() {
         return;
       }
 
+      // Capture before clearTableOrder() clears the store. Printing is
+      // fire-and-forget: the cart is already reset, so a print problem must
+      // not make a saved order look failed.
+      const invoiceId = synced?.name;
+      const kotNames = synced?.kot_names ?? [];
+
       clearTableOrder();
       showToast.success(isUpdatingOrder ? 'Order updated.' : 'Order sent to kitchen.');
       navigate('/order');
+
+      if (invoiceId && kotNames.length > 0) {
+        void printKotSlip({ invoiceId, kotNames });
+      }
     } catch (error) {
       console.error('Failed to sync order:', error);
       const serverMessages =

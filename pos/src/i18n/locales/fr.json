@@ -144,7 +144,9 @@
     "opening_balance_help": "Le solde d'ouverture est le montant de départ en espèces/paiement que vous déclarez pour cette équipe. Il sert à rapprocher les ventes à la fermeture.",
     "zero_balance_warning": "Vous ouvrez avec 0 ₹ sur tous les modes de paiement. Appuyez à nouveau sur « Confirmer et ouvrir » pour continuer quand même.",
     "confirm_zero_balance": "Confirmer et ouvrir",
-    "session_opened_success": "Session PDV ouverte"
+    "session_opened_success": "Session PDV ouverte",
+    "shift_not_open_title": "Service pas encore ouvert",
+    "shift_not_open_body": "Le caissier ou le responsable doit ouvrir le service avant de prendre des commandes."
   },
   "pos_closing": {
     "help_expected": "Le montant attendu par le systeme pour ce mode de paiement, base sur les factures du jour.",

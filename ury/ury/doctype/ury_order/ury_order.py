@@ -905,6 +905,60 @@ def _has_role(user_roles, role_permitted_rows):
     return any(row.role in user_roles for row in (role_permitted_rows or []))
 
 
+def _open_shift_for_branch(branch):
+    """The branch's open shift (single-shift model), or None.
+
+    Captains work without their own POS Opening Entry: the shift — and its
+    opener, who owns every invoice and the closing — is a property of the
+    branch, not of the session user.
+    """
+    if not branch:
+        return None
+
+    shift = frappe.db.get_value(
+        "POS Opening Entry",
+        {"branch": branch, "status": "Open", "docstatus": 1},
+        ["name", "user"],
+        as_dict=True,
+        order_by="period_start_date asc",
+    )
+    return shift
+
+
+def _default_customer_for(pos_profile):
+    """The POS Profile's default customer, validated, or None.
+
+    New orders fall back to this when the caller does not name a customer.
+    Returns None when the profile does not configure one, so the caller can
+    raise the pre-existing "please enter valid customer details" error. A
+    configured-but-unusable customer (deleted or disabled) raises a
+    configuration error instead of being silently skipped.
+    """
+    customer = getattr(pos_profile, "customer", None)
+    if not customer:
+        return None
+
+    if not frappe.db.exists("Customer", customer):
+        frappe.throw(
+            _(
+                "POS Profile {0} has default customer {1}, which no longer exists. "
+                "Fix the profile before taking orders."
+            ).format(frappe.bold(pos_profile.name), frappe.bold(customer)),
+            title=_("Invalid default customer"),
+        )
+
+    if frappe.db.get_value("Customer", customer, "disabled"):
+        frappe.throw(
+            _(
+                "POS Profile {0} has default customer {1}, which is disabled. "
+                "Fix the profile before taking orders."
+            ).format(frappe.bold(pos_profile.name), frappe.bold(customer)),
+            title=_("Invalid default customer"),
+        )
+
+    return customer
+
+
 def _order_ownership_flags(invoice, pos_profile_name=None):
     """Compute the same is_mine / has_elevated_access / is_billing_user /
     can_view / can_modify booleans that `get_table_order_context()` derives
@@ -1468,10 +1522,15 @@ def sync_order(
             )
             return {"status": "Failure"}
 
+    if not customer and invoice.name:
+        # Updating an existing order: never re-attribute it to the default.
+        customer = invoice.customer
     if not customer:
-        frappe.throw("Please enter valid customer details")
-    else:
-        invoice.customer = customer
+        # Single point where new orders inherit the POS Profile's customer.
+        customer = _default_customer_for(posprofile)
+    if not customer:
+        frappe.throw(_("Please enter valid customer details"))
+    invoice.customer = customer
 
     if order_type:
         invoice.order_type = order_type
@@ -1494,6 +1553,19 @@ def sync_order(
     invoice.pos_profile = pos_profile
     
     # Secure server-side attribution of cashier and waiter
+    #
+    # One-shift-per-branch: every order belongs to the branch's open shift.
+    # Captains have no POS Opening Entry of their own, so the shift (and the
+    # cashier it records) is resolved from the branch, never from the session.
+    shift = _open_shift_for_branch(invoice.branch)
+    if not shift:
+        frappe.throw(
+            _(
+                "The POS is closed for branch {0}. Ask the cashier or manager to open a shift."
+            ).format(frappe.bold(invoice.branch or "")),
+            title=_("POS Closed"),
+        )
+
     multiple_cashier = posprofile.custom_enable_multiple_cashier
     if multiple_cashier:
         pos_opening_list = frappe.db.sql("""
@@ -1519,7 +1591,7 @@ def sync_order(
         else:
             invoice.cashier = pos_opened_cashier
     else:
-        invoice.cashier = posprofile.applicable_for_users[0].user if posprofile.applicable_for_users else frappe.session.user
+        invoice.cashier = shift.user
 
     if not invoice.waiter:
         invoice.waiter = frappe.session.user
@@ -1601,19 +1673,36 @@ def sync_order(
     for item_dict in priced_items:
         invoice.append("items", item_dict)
 
+    # Frappe stamps `owner` with the session user on insert. In the single-shift
+    # model the invoice must belong to the shift's opener so the cashier's
+    # closing picks it up (ERPNext's closing only accepts invoices whose owner
+    # is the closing user). The captain stays recorded in `waiter`.
+    is_new_invoice = not invoice.name
+
     try:
         invoice.save()
     except Exception as e:
-        frappe.throw(f"Error while updating order: {e}")   
+        frappe.throw(f"Error while updating order: {e}")
+
+    if is_new_invoice and not multiple_cashier:
+        frappe.db.set_value(
+            "POS Invoice", invoice.name, "owner", shift.user, update_modified=False
+        )
+        # Keep the in-memory doc consistent with what we just stored, since
+        # this object is returned to the client.
+        invoice.owner = shift.user
 
 
     try:
-        kot_execute(invoice.name, customer, table, items, past_item, comments)
+        kot_names = kot_execute(
+            invoice.name, customer, table, items, past_item, comments
+        ) or []
 
     except Exception as e:
         # If an exception occurs (e.g., "kot" app not found), it will be caught here without affect the code execution.
-        error_msg = f"KOT Creation Failes {str(e)}"            
+        error_msg = f"KOT Creation Failes {str(e)}"
         frappe.log_error(error_msg, "KOT Error")
+        kot_names = []
 
     # table status
     if invoice.invoice_printed == 0:
@@ -1626,7 +1715,9 @@ def sync_order(
                     "URY Table", merged_table.strip(), {"occupied": 1, "latest_invoice_time": invoice.creation}
                 )
 
-    return invoice.as_dict()
+    # Additive key: the POS prints the browser KOT slip for exactly these
+    # delta KOTs. Existing callers that ignore it are unaffected.
+    return {**invoice.as_dict(), "kot_names": kot_names}
 
 
 @frappe.whitelist()

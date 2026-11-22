@@ -769,8 +769,21 @@ def getPosProfile():
                     cashier = pos_opened_cashier    
                 
         else:    
-            cashier = get_cashier.applicable_for_users[0].user
-            owner = get_cashier.applicable_for_users[0].user
+            # Single-shift model: report the open shift's opener as the
+            # cashier, so the POS shows the person whose shift owns every
+            # invoice (the session user may just be joining that shift).
+            shift_user = frappe.db.get_value(
+                "POS Opening Entry",
+                {"branch": branchName, "status": "Open", "docstatus": 1},
+                "user",
+                order_by="period_start_date asc",
+            )
+            cashier = shift_user or (
+                get_cashier.applicable_for_users[0].user
+                if get_cashier.applicable_for_users
+                else frappe.session.user
+            )
+            owner = cashier
         
         qz_print = pos_profiles.qz_print
         print_type = None
@@ -1009,7 +1022,7 @@ def get_open_pos_opening_entries(pos_profile):
             "status": "Open",
             "docstatus": 1,
         },
-        fields=["name", "period_start_date", "user", "pos_profile"],
+        fields=["name", "period_start_date", "user", "pos_profile", "company", "branch"],
     )
 
 

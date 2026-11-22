@@ -97,6 +97,8 @@ export interface OpenPosOpeningEntry {
   period_start_date: string;
   user: string;
   pos_profile: string;
+  company: string;
+  branch?: string;
 }
 
 /**

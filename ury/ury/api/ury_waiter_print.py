@@ -1,9 +1,44 @@
 import frappe
+from frappe import _
 from frappe.utils.print_format import print_by_server
 
 WAITER_PRINT_FORMAT = "URY Waiter Order Slip"
 ADD_KOT_TYPES = ("New Order", "Order Modified")
 CANCEL_KOT_TYPES = ("Partially cancelled", "Cancelled")
+
+
+def _is_usable_kot_format(name):
+	"""True if `name` is an enabled Print Format for the URY KOT doctype."""
+	if not name:
+		return False
+
+	row = frappe.db.get_value("Print Format", name, ["doc_type", "disabled"])
+	return bool(row) and row[0] == "URY KOT" and not row[1]
+
+
+def resolve_kot_print_format():
+	"""Pick the KOT slip format at request time, entirely from Desk.
+
+	Resolution is deliberately live (not cached) and has no schema behind it:
+
+	1. `URY KOT`'s default Print Format — what Desk's "Set as Default" writes
+	   on a Print Format form.
+	2. The shipped `URY Waiter Order Slip`, when it still exists and is
+	   enabled.
+	3. `None`, which makes Frappe render its own "Standard" format.
+
+	Editing either format in Desk changes the next slip: `frappe.get_print`
+	reads the Print Format record and compiles its HTML on every call.
+	"""
+	default_format = frappe.get_meta("URY KOT").default_print_format
+
+	if _is_usable_kot_format(default_format):
+		return default_format
+
+	if _is_usable_kot_format(WAITER_PRINT_FORMAT):
+		return WAITER_PRINT_FORMAT
+
+	return None
 
 
 def _get_room_waiter_printers(room):
@@ -51,6 +86,12 @@ def _aggregate_kot_items(kot_docs):
 					"comments": row.comments,
 					"course": row.course,
 					}
+				else:
+					# The same item can appear on more than one add KOT in a
+					# single send (e.g. two stations sharing an item group).
+					# The slip shows the quantity for the whole send, so sum
+					# rather than keep only the first line.
+					add_items[key]["quantity"] += int(row.quantity or 0)
 
 	return list(add_items.values()) + list(cancel_items.values())
 
@@ -194,3 +235,84 @@ def print_combined_waiter_order_slip(invoice_id, kot_names, restaurant_table):
 				f"Waiter print failed for invoice {invoice_id}: {e}",
 				"URY Waiter Print",
 			)
+
+
+@frappe.whitelist()
+def get_combined_kot_print_html(invoice, kot_names=None):
+	"""Render the combined KOT slip for the POS browser print dialog.
+
+	This is a read-only render: it never touches `POS Invoice.invoice_printed`,
+	table occupancy or merged tables. Printing the *bill* is what advances the
+	order to Unbilled; a KOT slip must not.
+
+	The slip content is the same combined URY KOT document the server path
+	prints, and the format is resolved from Desk on every call, so a print
+	format edited or newly set as default in Desk is used on the next send.
+	"""
+	invoice_doc = frappe.get_doc("POS Invoice", invoice)
+
+	if not frappe.has_permission("POS Invoice", "read", doc=invoice_doc):
+		frappe.throw(_("Not permitted to print this order"), frappe.PermissionError)
+
+	# Same branch gate as reprint_kot: a POS user may only print their own
+	# branch's slips. Imported lazily to keep this module free of a
+	# ury_pos.api import cycle at load time.
+	from ury.ury_pos.api import getBranch
+
+	try:
+		user_branch = getBranch()
+	except frappe.ValidationError:
+		if frappe.session.user == "Administrator" or "System Manager" in frappe.get_roles():
+			user_branch = None
+		else:
+			raise
+
+	if user_branch and invoice_doc.branch and invoice_doc.branch != user_branch:
+		frappe.throw(
+			_("Not permitted to print KOTs for orders outside your active branch"),
+			frappe.PermissionError,
+		)
+
+	requested = frappe.parse_json(kot_names) or []
+	if isinstance(requested, str):
+		requested = [requested]
+
+	# Never let a caller print another invoice's KOTs, and keep the caller's
+	# order so the slip reads the same way the send produced it.
+	belonging = set(
+		frappe.get_all(
+			"URY KOT",
+			filters={"name": ["in", requested], "invoice": invoice},
+			pluck="name",
+		)
+	)
+	names = [name for name in requested if name in belonging][:50]
+
+	if not names:
+		frappe.throw(_("No KOTs found for this order"), frappe.ValidationError)
+
+	combined_doc = build_combined_kot_doc(names)
+	if not combined_doc or not combined_doc.kot_items:
+		frappe.throw(_("No KOT items found for this order"), frappe.ValidationError)
+
+	# copy_doc() drops name and docstatus outside tests. The source KOTs are
+	# submitted, so mirror that here: otherwise rendering depends on the
+	# site-wide "allow print for draft" setting.
+	combined_doc.name = names[0]
+	combined_doc.docstatus = 1
+
+	print_format = resolve_kot_print_format()
+	html = frappe.get_print(
+		"URY KOT",
+		names[0],
+		print_format,
+		doc=combined_doc,
+		no_letterhead=1,
+	)
+
+	return {
+		"html": html,
+		"kot_names": names,
+		"print_format": print_format or "Standard",
+	}
+
