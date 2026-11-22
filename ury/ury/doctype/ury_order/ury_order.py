@@ -1694,12 +1694,15 @@ def sync_order(
 
 
     try:
-        kot_execute(invoice.name, customer, table, items, past_item, comments)
+        kot_names = kot_execute(
+            invoice.name, customer, table, items, past_item, comments
+        ) or []
 
     except Exception as e:
         # If an exception occurs (e.g., "kot" app not found), it will be caught here without affect the code execution.
-        error_msg = f"KOT Creation Failes {str(e)}"            
+        error_msg = f"KOT Creation Failes {str(e)}"
         frappe.log_error(error_msg, "KOT Error")
+        kot_names = []
 
     # table status
     if invoice.invoice_printed == 0:
@@ -1712,7 +1715,9 @@ def sync_order(
                     "URY Table", merged_table.strip(), {"occupied": 1, "latest_invoice_time": invoice.creation}
                 )
 
-    return invoice.as_dict()
+    # Additive key: the POS prints the browser KOT slip for exactly these
+    # delta KOTs. Existing callers that ignore it are unaffected.
+    return {**invoice.as_dict(), "kot_names": kot_names}
 
 
 @frappe.whitelist()

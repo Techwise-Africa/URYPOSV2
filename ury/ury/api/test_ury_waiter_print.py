@@ -6,7 +6,9 @@ from frappe.tests.utils import FrappeTestCase
 from ury.ury.api.ury_waiter_print import (
 	WAITER_PRINT_FORMAT,
 	build_combined_kot_doc,
+	get_combined_kot_print_html,
 	print_combined_waiter_order_slip,
+	resolve_kot_print_format,
 )
 
 
@@ -81,7 +83,7 @@ class TestURYWaiterPrint(FrappeTestCase):
 		self.assertEqual(len(combined_doc.kot_items), 2)
 		self.assertEqual(combined_doc.kot_items[0].item, "Pizza")
 		self.assertEqual(combined_doc.kot_items[0].display_mode, "single_qty")
-		self.assertEqual(combined_doc.kot_items[1].quantity, "2")
+		self.assertEqual(combined_doc.kot_items[1].quantity, 2)
 		self.assertEqual(combined_doc.kot_items[1].display_mode, "single_qty")
 
 	@patch("ury.ury.api.ury_waiter_print.frappe.get_all")
@@ -112,7 +114,7 @@ class TestURYWaiterPrint(FrappeTestCase):
 		combined_doc = build_combined_kot_doc(["KOT-1", "KOT-2"])
 
 		self.assertEqual(len(combined_doc.kot_items), 1)
-		self.assertEqual(combined_doc.kot_items[0].quantity, "3")
+		self.assertEqual(combined_doc.kot_items[0].quantity, 3)
 		self.assertEqual(combined_doc.kot_items[0].display_mode, "single_qty")
 
 	@patch("ury.ury.api.ury_waiter_print.frappe.get_all")
@@ -173,7 +175,7 @@ class TestURYWaiterPrint(FrappeTestCase):
 		combined_doc = build_combined_kot_doc(["KOT-1"])
 
 		self.assertEqual(combined_doc.kot_items[0].display_mode, "single_qty")
-		self.assertEqual(combined_doc.kot_items[0].quantity, "3")
+		self.assertEqual(combined_doc.kot_items[0].quantity, 3)
 
 	@patch("ury.ury.api.ury_waiter_print.frappe.get_all")
 	@patch("ury.ury.api.ury_waiter_print.frappe.copy_doc")
@@ -479,3 +481,162 @@ class TestURYWaiterPrint(FrappeTestCase):
 		html = print_format.html.lower()
 		for keyword in ("rate", "amount", "tax", "total", "payment", "grand"):
 			self.assertNotIn(keyword, html)
+
+
+class TestKotBrowserPrint(FrappeTestCase):
+	"""The browser KOT slip must follow Desk, never a copy baked into the app.
+
+	Resolution and rendering both happen per request: the Print Format record
+	is read from the database and its HTML compiled fresh, so an edit or a new
+	"Set as Default" in Desk is used by the very next send.
+	"""
+
+	def test_resolver_prefers_the_doctype_default(self):
+		with patch(
+			"ury.ury.api.ury_waiter_print.frappe.get_meta"
+		) as mock_get_meta, patch(
+			"ury.ury.api.ury_waiter_print._is_usable_kot_format",
+			return_value=True,
+		) as mock_usable:
+			mock_get_meta.return_value = frappe._dict(
+				default_print_format="House KOT Slip"
+			)
+
+			self.assertEqual(resolve_kot_print_format(), "House KOT Slip")
+			mock_usable.assert_called_once_with("House KOT Slip")
+
+	def test_resolver_falls_back_to_the_shipped_slip(self):
+		def usable(name):
+			return name == WAITER_PRINT_FORMAT
+
+		with patch(
+			"ury.ury.api.ury_waiter_print.frappe.get_meta"
+		) as mock_get_meta, patch(
+			"ury.ury.api.ury_waiter_print._is_usable_kot_format",
+			side_effect=usable,
+		):
+			mock_get_meta.return_value = frappe._dict(default_print_format=None)
+
+			self.assertEqual(resolve_kot_print_format(), WAITER_PRINT_FORMAT)
+
+	def test_resolver_skips_an_unusable_default(self):
+		def usable(name):
+			return name == WAITER_PRINT_FORMAT
+
+		with patch(
+			"ury.ury.api.ury_waiter_print.frappe.get_meta"
+		) as mock_get_meta, patch(
+			"ury.ury.api.ury_waiter_print._is_usable_kot_format",
+			side_effect=usable,
+		):
+			mock_get_meta.return_value = frappe._dict(
+				default_print_format="Deleted Slip"
+			)
+
+			self.assertEqual(resolve_kot_print_format(), WAITER_PRINT_FORMAT)
+
+	def test_resolver_returns_none_when_nothing_is_usable(self):
+		with patch(
+			"ury.ury.api.ury_waiter_print.frappe.get_meta"
+		) as mock_get_meta, patch(
+			"ury.ury.api.ury_waiter_print._is_usable_kot_format",
+			return_value=False,
+		):
+			mock_get_meta.return_value = frappe._dict(default_print_format=None)
+
+			self.assertIsNone(resolve_kot_print_format())
+
+	def _payload_mocks(self):
+		"""Shared mocks for the endpoint: invoice, permission, branch, KOT rows."""
+		invoice = MagicMock()
+		invoice.branch = "Havenflow"
+		return invoice
+
+	@patch("ury.ury.api.ury_waiter_print.frappe.get_print", return_value="<html>slip</html>")
+	@patch(
+		"ury.ury.api.ury_waiter_print.resolve_kot_print_format",
+		return_value=WAITER_PRINT_FORMAT,
+	)
+	@patch("ury.ury.api.ury_waiter_print.build_combined_kot_doc")
+	@patch("ury.ury.api.ury_waiter_print.frappe.get_all", return_value=["KOT-1"])
+	@patch("ury.ury.api.ury_waiter_print.frappe.db.set_value")
+	@patch("ury.ury.api.ury_waiter_print.frappe.has_permission", return_value=True)
+	@patch("ury.ury.api.ury_waiter_print.frappe.get_doc")
+	@patch("ury.ury_pos.api.getBranch", return_value="Havenflow")
+	def test_endpoint_renders_the_resolved_format_and_writes_nothing(
+		self,
+		_mock_branch,
+		mock_get_doc,
+		_mock_permission,
+		mock_set_value,
+		_mock_get_all,
+		mock_build,
+		_mock_resolve,
+		mock_get_print,
+	):
+		mock_get_doc.return_value = self._payload_mocks()
+
+		combined = MagicMock()
+		combined.kot_items = [object()]
+		mock_build.return_value = combined
+
+		result = get_combined_kot_print_html("INV-1", '["KOT-1"]')
+
+		self.assertEqual(result["html"], "<html>slip</html>")
+		self.assertEqual(result["kot_names"], ["KOT-1"])
+		self.assertEqual(result["print_format"], WAITER_PRINT_FORMAT)
+
+		# The copy mirrors the submitted source KOT, so rendering does not
+		# depend on the site-wide "allow print for draft" setting.
+		self.assertEqual(combined.name, "KOT-1")
+		self.assertEqual(combined.docstatus, 1)
+
+		mock_get_print.assert_called_once_with(
+			"URY KOT",
+			"KOT-1",
+			WAITER_PRINT_FORMAT,
+			doc=combined,
+			no_letterhead=1,
+		)
+
+		# The critical guarantee: a KOT slip never advances the bill state.
+		mock_set_value.assert_not_called()
+
+	@patch("ury.ury.api.ury_waiter_print.frappe.get_print")
+	@patch("ury.ury.api.ury_waiter_print.build_combined_kot_doc")
+	@patch("ury.ury.api.ury_waiter_print.frappe.get_all", return_value=[])
+	@patch("ury.ury.api.ury_waiter_print.frappe.has_permission", return_value=True)
+	@patch("ury.ury.api.ury_waiter_print.frappe.get_doc")
+	@patch("ury.ury_pos.api.getBranch", return_value="Havenflow")
+	def test_endpoint_rejects_kots_from_another_invoice(
+		self,
+		_mock_branch,
+		mock_get_doc,
+		_mock_permission,
+		_mock_get_all,
+		mock_build,
+		mock_get_print,
+	):
+		mock_get_doc.return_value = self._payload_mocks()
+
+		with self.assertRaises(frappe.ValidationError):
+			get_combined_kot_print_html("INV-1", '["KOT-FROM-OTHER-INVOICE"]')
+
+		mock_build.assert_not_called()
+		mock_get_print.assert_not_called()
+
+	@patch("ury.ury.api.ury_waiter_print.frappe.get_all")
+	@patch("ury.ury.api.ury_waiter_print.frappe.has_permission", return_value=False)
+	@patch("ury.ury.api.ury_waiter_print.frappe.get_doc")
+	def test_endpoint_requires_invoice_read_permission(
+		self,
+		mock_get_doc,
+		_mock_permission,
+		_mock_get_all,
+	):
+		mock_get_doc.return_value = self._payload_mocks()
+
+		with self.assertRaises(frappe.PermissionError):
+			get_combined_kot_print_html("INV-1", '["KOT-1"]')
+
+		_mock_get_all.assert_not_called()

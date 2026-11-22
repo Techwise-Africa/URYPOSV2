@@ -94,12 +94,29 @@ export interface SyncOrderRequest {
  * sync_order returns the synced POS Invoice on success, or `{ status: 'Failure' }`
  * when the backend rejects the write (e.g. stale last_modified_time, table already
  * occupied, or an already-billed invoice).
+ *
+ * `kot_names` lists the delta KOTs this send created. The POS prints the
+ * browser slip for exactly those, so it never reprints earlier items.
  */
-export type SyncOrderResponse = POSInvoice | { status: 'Failure' };
+export type SyncOrderResponse =
+  | (POSInvoice & { kot_names?: string[] })
+  | { status: 'Failure' };
 
 export const syncOrder = async (data: SyncOrderRequest) => {
   return call.post('ury.ury.doctype.ury_order.ury_order.sync_order', data) as Promise<{ message: SyncOrderResponse }>;
 };
+
+/** Narrows sync_order's union so callers can read invoice fields safely. */
+export function isSyncOrderFailure(
+  response: SyncOrderResponse | null | undefined
+): response is { status: 'Failure' } {
+  return Boolean(
+    response &&
+      typeof response === 'object' &&
+      'status' in response &&
+      response.status === 'Failure'
+  );
+}
 
 export interface SplitBillItemMove {
   name: string;

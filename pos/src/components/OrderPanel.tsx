@@ -10,7 +10,8 @@ import CommentDialog from './CommentDialog';
 import OrderTabs from './OrderTabs';
 import { Button } from '@ury/ui';
 import { Spinner } from '@ury/ui';
-import { syncOrder } from '../lib/order-api';
+import { syncOrder, isSyncOrderFailure } from '../lib/order-api';
+import { printKotSlip } from '../lib/kot-print';
 import { useRootStore } from '../store/root-store';
 import type { RootState } from '../store/root-store';
 import { showToast } from '@ury/ui';
@@ -137,14 +138,25 @@ const OrderPanel = () => {
       // sync_order returns { status: 'Failure' } instead of throwing when the
       // write is rejected (stale last_modified_time, table already occupied,
       // or the invoice was already billed by another user).
-      if (result?.message && typeof result.message === 'object' && 'status' in result.message && result.message.status === 'Failure') {
+      const synced = result?.message;
+      if (isSyncOrderFailure(synced)) {
         showToast.error(isUpdatingOrder ? t('errors.order_modified') : t('errors.order_sync_failed'));
         return;
       }
 
+      // Capture before resetOrderState() clears the store. The KOT slip is
+      // fire-and-forget: it must never hold up the next order or turn a saved
+      // order into a failure.
+      const invoiceId = synced?.name;
+      const kotNames = synced?.kot_names ?? [];
+
       // Reset all states after successful order submission
       resetOrderState();
       showToast.success(isUpdatingOrder ? t('success.order_updated') : t('success.order_created'));
+
+      if (invoiceId && kotNames.length > 0) {
+        void printKotSlip({ invoiceId, kotNames });
+      }
     } catch (error) {
       console.error('Failed to sync order:', error);
       showToast.error(parseFrappeError(error, t('errors.failed_process_order')));

@@ -40,6 +40,7 @@ class TestURYOrderSEC11(FrappeTestCase):
             get_order_invoice(invoiceNo="POS-INV-001")
         self.assertIn("outside your active branch", str(context.exception))
 class TestURYOrder(FrappeTestCase):
+    @patch("ury.ury.doctype.ury_order.ury_order.frappe.db.set_value")
     @patch("ury.ury.doctype.ury_order.ury_order.kot_execute")
     @patch("ury.ury.doctype.ury_order.ury_order.get_order_invoice")
     @patch(
@@ -51,7 +52,7 @@ class TestURYOrder(FrappeTestCase):
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_doc")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.get_roles")
     @patch("ury.ury.doctype.ury_order.ury_order.frappe.session")
-    def test_sync_order_authorized(self, mock_session, mock_get_roles, mock_get_doc, mock_get_value, mock_has_permission, mock_shift, mock_get_order_invoice, mock_kot):
+    def test_sync_order_authorized(self, mock_session, mock_get_roles, mock_get_doc, mock_get_value, mock_has_permission, mock_shift, mock_get_order_invoice, mock_kot, mock_set_value):
         # Setup mock invoice
         mock_invoice = MagicMock()
         mock_invoice.name = "POS-INV-001"
@@ -60,6 +61,8 @@ class TestURYOrder(FrappeTestCase):
         mock_invoice.invoice_printed = 0
         mock_invoice.items = []
         mock_invoice.waiter = "existing_waiter"
+        mock_invoice.as_dict.return_value = {"name": "POS-INV-001"}
+        mock_kot.return_value = ["KOT-1"]
 
         mock_get_order_invoice.return_value = mock_invoice
 
@@ -88,33 +91,30 @@ class TestURYOrder(FrappeTestCase):
         try:
             # We mock frappe.db.sql as well in another patch if needed
             with patch("ury.ury.doctype.ury_order.ury_order.frappe.db.sql") as mock_sql:
-                # We expect this to not raise a PermissionError
-                # It might raise other errors due to missing items etc, but we just want to ensure
-                # it passes the permission check.
-                # Actually, let's catch everything and just assert has_permission was called.
-                try:
-                    sync_order(
-                        items="[]",
-                        cashier="fake_cashier",
-                        owner="fake_owner",
-                        mode_of_payment="Cash",
-                        customer="Test Customer",
-                        no_of_pax=2,
-                        last_invoice=None,
-                        waiter="fake_waiter",
-                        pos_profile="Test Profile"
-                    )
-                except Exception as e:
-                    pass
-                
+                response = sync_order(
+                    items="[]",
+                    cashier="fake_cashier",
+                    owner="fake_owner",
+                    mode_of_payment="Cash",
+                    customer="Test Customer",
+                    no_of_pax=2,
+                    last_invoice=None,
+                    waiter="fake_waiter",
+                    pos_profile="Test Profile"
+                )
+
                 mock_has_permission.assert_called_once_with("POS Invoice", "write", doc=mock_invoice)
-                
+
                 # Verify the caller-supplied cashier/waiter were ignored.
                 # One-shift-per-branch: cashier comes from the branch's open
                 # shift (its opener), never from the request or the session.
                 self.assertEqual(mock_invoice.cashier, "opener@example.com")
                 # Waiter should remain "existing_waiter" because it was an existing invoice and we don't overwrite
                 self.assertEqual(mock_invoice.waiter, "existing_waiter")
+                # The delta KOTs created by this send travel back with the
+                # invoice, so the POS can print exactly the browser slip.
+                self.assertEqual(response["name"], "POS-INV-001")
+                self.assertEqual(response["kot_names"], ["KOT-1"])
         except Exception as e:
             self.fail(f"Test failed with {e}")
 

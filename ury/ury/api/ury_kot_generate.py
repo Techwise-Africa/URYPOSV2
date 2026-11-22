@@ -404,6 +404,10 @@ def kot_execute(
     if created_kot_names:
         print_combined_waiter_order_slip(invoice_id, created_kot_names, restaurant_table)
 
+    # Returned so sync_order can tell the POS *which* KOTs this send produced.
+    # The browser slip prints exactly these (the delta), never the whole order.
+    return created_kot_names
+
 
 # Compare two arrays and return the items that are different
 def compare_two_array(array_1, array_2):
